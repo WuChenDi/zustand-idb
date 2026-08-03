@@ -24,7 +24,7 @@ const useFileStore = createStore(
 - **A drop-in `persist` storage** — implements Zustand's `PersistStorage`, so `version`, `migrate`, `partialize`, and `onRehydrateStorage` keep working unchanged.
 - **One database, many stores** — every `persist({ name })` maps to its own row, so unrelated stores can share a single database + object store instead of needing one database each.
 - **Robust connection handling** — a single cached connection per database (writes stay ordered), automatic object-store creation that survives losing a version race against another tab, cooperative `versionchange` handling so other tabs are never blocked, and writes that resolve only after the transaction commits (so `QuotaExceededError` surfaces instead of being swallowed).
-- **Graceful fallback** — when IndexedDB is unavailable (private mode, SSR, disabled), it transparently falls back to in-memory storage so hydration never crashes.
+- **Graceful fallback** — when IndexedDB is unavailable it transparently falls back to in-memory storage so hydration never crashes. Availability is decided by actually connecting, which covers both a missing global (SSR) and a global that refuses to open (Firefox private mode, Safari ITP).
 - **Tiny and typed** — ESM + CJS, full TypeScript types, `zustand` as the only peer dependency.
 
 ## Install
@@ -74,7 +74,7 @@ await useUserStore.setState({ name: 'Kaley' })
 
 Returns a Zustand `PersistStorage` that reads, writes, and deletes state in that object store. The `name` option of your `persist()` middleware is used as the **row key**, so multiple stores can share one `databaseName` + `storeName` while each keeps its own rehydration and migration logic.
 
-When IndexedDB is unavailable, the returned storage is an in-memory implementation instead: hydration and state stay usable for the session, but nothing is persisted.
+When IndexedDB turns out to be unavailable, the storage degrades to an in-memory implementation on first use and warns once: hydration and state stay usable for the session, but nothing is persisted. Only failures to *connect* degrade — an error raised by a running transaction (`QuotaExceededError`, a value that can't be structured-cloned, …) rejects normally so you can handle it.
 
 ### `deleteDatabase(databaseName)`
 
