@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { persist } from 'zustand/middleware'
 import { createStore } from 'zustand/vanilla'
 import {
@@ -7,6 +7,7 @@ import {
   deleteDatabase,
   storeKeys,
 } from '../src'
+import { ensureStore } from '../src/db'
 import { getRow } from './utils'
 
 interface User {
@@ -153,6 +154,125 @@ describe('createIndexedDBStorage', () => {
         globalThis.indexedDB = original
       }
     })
+  })
+})
+
+describe('multiple object stores in one database', () => {
+  it('shares a single connection across stores', async ({ task }) => {
+    // Creating the second store swaps the connection for an upgraded one, so
+    // only settle the schema first.
+    await ensureStore(task.id, 'store-a')
+    await ensureStore(task.id, 'store-b')
+
+    const [a, b] = await Promise.all([
+      ensureStore(task.id, 'store-a'),
+      ensureStore(task.id, 'store-b'),
+    ])
+
+    // One connection per database, not per (database, store): our own
+    // connections must never sit in the way of each other's upgrades.
+    expect(a).toBe(b)
+    expect(a.objectStoreNames.contains('store-a')).toBe(true)
+    expect(a.objectStoreNames.contains('store-b')).toBe(true)
+  })
+
+  it('creates two stores requested concurrently', async ({ task }) => {
+    // Seed the database so both stores have to take the version-upgrade path,
+    // which is where a shared database can race itself.
+    await ensureStore(task.id, 'seed')
+
+    const a = createIndexedDBStorage<User>(task.id, 'store-a')
+    const b = createIndexedDBStorage<User>(task.id, 'store-b')
+
+    await Promise.all([
+      a.setItem('user', { state: { name: 'Ann' }, version: VERSION }),
+      b.setItem('user', { state: { name: 'Bob' }, version: VERSION }),
+    ])
+
+    await expect(a.getItem('user')).resolves.toEqual({
+      state: { name: 'Ann' },
+      version: VERSION,
+    })
+    await expect(b.getItem('user')).resolves.toEqual({
+      state: { name: 'Bob' },
+      version: VERSION,
+    })
+  })
+
+  it('retries when another tab claims the version number first', async ({
+    task,
+  }) => {
+    // Seed the database so creating `store-a` needs a version bump.
+    await ensureStore(task.id, 'seed')
+
+    const realOpen = indexedDB.open.bind(indexedDB)
+    let hijacked = false
+    const open = vi.spyOn(indexedDB, 'open').mockImplementation(((
+      name: string,
+      version?: number,
+    ) => {
+      // Let "another tab" grab the first version number we reach for. Its
+      // request is queued ahead of ours, so our `upgradeneeded` never runs
+      // and the connection we get back is missing the store we asked for.
+      if (version !== undefined && !hijacked) {
+        hijacked = true
+        const competitor = realOpen(name, version)
+        competitor.onupgradeneeded = () =>
+          competitor.result.createObjectStore('other-tab')
+        competitor.onsuccess = () => competitor.result.close()
+      }
+      return realOpen(name, version)
+    }) as typeof indexedDB.open)
+
+    try {
+      const database = await ensureStore(task.id, 'store-a')
+
+      expect(hijacked).toBe(true)
+      // The contract of `ensureStore`: a resolved connection always exposes the
+      // requested store. Losing the version race must be retried away here, not
+      // left for the caller's transaction to trip over.
+      expect(database.objectStoreNames.contains('store-a')).toBe(true)
+
+      const a = createIndexedDBStorage<User>(task.id, 'store-a')
+      await a.setItem('user', { state: { name: 'Ann' }, version: VERSION })
+      await expect(a.getItem('user')).resolves.toEqual({
+        state: { name: 'Ann' },
+        version: VERSION,
+      })
+    } finally {
+      open.mockRestore()
+    }
+  })
+
+  it('adds a store to a database that is already open', async ({ task }) => {
+    const a = createIndexedDBStorage<User>(task.id, 'store-a')
+    await a.setItem('user', { state: { name: 'Ann' }, version: VERSION })
+
+    // `store-a` is connected and cached; adding `store-b` needs an upgrade that
+    // must not be blocked by our own connection.
+    const b = createIndexedDBStorage<User>(task.id, 'store-b')
+    await b.setItem('user', { state: { name: 'Bob' }, version: VERSION })
+
+    // The pre-existing store keeps working across the upgrade.
+    await expect(a.getItem('user')).resolves.toEqual({
+      state: { name: 'Ann' },
+      version: VERSION,
+    })
+    await expect(storeKeys(task.id, 'store-b')).resolves.toEqual(['user'])
+  })
+})
+
+describe('without IndexedDB', () => {
+  it('keeps the helpers usable instead of throwing', async ({ task }) => {
+    const original = globalThis.indexedDB
+    globalThis.indexedDB = undefined as unknown as IDBFactory
+    try {
+      await expect(storeKeys(task.id, 'store')).resolves.toEqual([])
+      await expect(clearStore(task.id, 'store')).resolves.toBeUndefined()
+      await expect(deleteDatabase(task.id)).resolves.toBeUndefined()
+    } finally {
+      globalThis.indexedDB = original
+    }
   })
 })
 

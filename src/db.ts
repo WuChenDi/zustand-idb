@@ -1,87 +1,166 @@
-// Module-level connection cache: reuse a single connection per (db, store)
-// so we don't reopen the database on every read/write, and so transactions on
-// the same connection commit in call order (avoids out-of-order writes).
-const connections = new Map<string, Promise<IDBDatabase>>()
+/**
+ * Module-level connection cache: one connection per database, shared by every
+ * object store inside it. Keeping it per-database (rather than per db+store)
+ * means our own connections never block each other's upgrades, and transactions
+ * issued on the shared connection commit in call order (avoids out-of-order
+ * writes).
+ */
+type DatabaseEntry = {
+  connection: Promise<IDBDatabase>
+  /** Object stores the cached connection is known to expose. */
+  stores: Set<string>
+}
 
-const cacheKeyOf = (databaseName: string, storeName: string) =>
-  `${databaseName}::${storeName}`
+const databases = new Map<string, DatabaseEntry>()
+
+/** An upgrade can lose a version race against another tab; bound the retries. */
+const MAX_OPEN_ATTEMPTS = 5
 
 /**
- * Open (and cache) a connection to the target store. The connection closes
- * itself and drops out of the cache when another tab upgrades or deletes the
- * database, so it never blocks the other tab.
+ * IndexedDB is missing entirely in SSR and some sandboxed contexts. Note that
+ * "present" does not imply "usable": `open()` still throws in Firefox private
+ * mode, which is why callers must also handle a rejected connection.
  */
-export function getConnection(
+function isIndexedDBAvailable(): boolean {
+  return typeof indexedDB !== 'undefined' && indexedDB !== null
+}
+
+/**
+ * Resolve a cached connection guaranteed to expose `storeName`, opening or
+ * upgrading the database as needed. Work on a database is chained onto whatever
+ * is already in flight for it, so two stores can never race each other into a
+ * version conflict.
+ */
+export function ensureStore(
   databaseName: string,
   storeName: string,
 ): Promise<IDBDatabase> {
-  const cacheKey = cacheKeyOf(databaseName, storeName)
-  const cached = connections.get(cacheKey)
-  if (cached) return cached
+  const current = databases.get(databaseName)
+  if (current?.stores.has(storeName)) return current.connection
 
-  const connection = openDatabase(databaseName, storeName).then((database) => {
+  // The `stores` set doubles as this entry's identity token, so asynchronous
+  // cleanup only ever evicts itself and never a newer connection.
+  const stores = new Set<string>()
+  const evict = () => {
+    if (databases.get(databaseName)?.stores === stores) {
+      databases.delete(databaseName)
+    }
+  }
+
+  const track = (database: IDBDatabase) => {
+    for (const name of database.objectStoreNames) stores.add(name)
+    // Rebind on every adoption: an inherited connection still points at the
+    // previous entry's (now stale) eviction closure.
+    //
     // Step aside when another tab needs to upgrade/delete the database, and
     // invalidate the cache so the next call reconnects.
     database.onversionchange = () => {
       database.close()
-      connections.delete(cacheKey)
+      evict()
     }
-    // Drop the stale connection from the cache whenever it closes.
-    database.onclose = () => {
-      connections.delete(cacheKey)
-    }
+    // Drop the stale connection from the cache whenever it closes abnormally.
+    database.onclose = evict
     return database
-  })
-  // Never cache a rejected promise, otherwise every later call is dragged down
-  // by the same failure.
-  connection.catch(() => connections.delete(cacheKey))
-  connections.set(cacheKey, connection)
+  }
+
+  const adopt = async (existing?: IDBDatabase) => {
+    // The chained connection may already carry the store we need.
+    if (existing?.objectStoreNames.contains(storeName)) return track(existing)
+    existing?.close()
+    return track(await openWithStore(databaseName, storeName))
+  }
+
+  const previous = current?.connection
+  const connection = previous
+    ? previous.then(adopt, () => adopt(undefined))
+    : adopt(undefined)
+
+  databases.set(databaseName, { connection, stores })
+  // Never leave a rejected connection cached, otherwise every later call is
+  // dragged down by the same failure.
+  connection.catch(evict)
   return connection
 }
 
-export function openDatabase(
+/**
+ * Open `databaseName` and guarantee `storeName` exists on the returned
+ * connection.
+ */
+async function openWithStore(
   databaseName: string,
   storeName: string,
 ): Promise<IDBDatabase> {
-  return new Promise<IDBDatabase>((resolve, reject) => {
+  if (!isIndexedDBAvailable()) {
+    throw new Error('IndexedDB is not available in this environment')
+  }
+
+  for (let attempt = 0; attempt < MAX_OPEN_ATTEMPTS; attempt++) {
     // No explicit version: open the current version, or create the database
     // (version 1, firing `upgradeneeded`) when it does not exist yet.
-    const openRequest = indexedDB.open(databaseName)
+    const database = await requestOpen(databaseName, undefined, storeName)
+    if (database.objectStoreNames.contains(storeName)) return database
 
-    openRequest.onerror = () => reject(openRequest.error)
-    // Create the store here for a brand-new database.
-    openRequest.onupgradeneeded = () =>
-      createStoreIfMissing(openRequest, storeName)
+    // Database exists but the store is missing: reopen at the next version to
+    // trigger `upgradeneeded` and create the store.
+    const nextVersion = database.version + 1
+    database.close()
 
-    openRequest.onsuccess = () => {
-      const database = openRequest.result
-      if (database.objectStoreNames.contains(storeName)) {
-        resolve(database)
-        return
-      }
-      // Database exists but the store is missing: reopen at the next version to
-      // trigger `upgradeneeded` and create the store.
-      const nextVersion = database.version + 1
-      database.close()
+    const upgraded = await requestOpen(databaseName, nextVersion, storeName)
+    // Another tab may have claimed this version number first, in which case our
+    // `upgradeneeded` never ran and the store is still missing. Start over.
+    if (upgraded.objectStoreNames.contains(storeName)) return upgraded
+    upgraded.close()
+  }
 
-      const upgradeRequest = indexedDB.open(databaseName, nextVersion)
-      upgradeRequest.onerror = () => reject(upgradeRequest.error)
-      // Another tab holding an old connection blocks the upgrade; fail fast
-      // instead of hanging forever.
-      upgradeRequest.onblocked = () =>
-        reject(new Error(`IndexedDB upgrade blocked: ${databaseName}`))
-      upgradeRequest.onupgradeneeded = () =>
-        createStoreIfMissing(upgradeRequest, storeName)
-      upgradeRequest.onsuccess = () => resolve(upgradeRequest.result)
-    }
-  })
+  throw new Error(
+    `IndexedDB could not create object store: ${databaseName}/${storeName}`,
+  )
 }
 
-function createStoreIfMissing(request: IDBOpenDBRequest, storeName: string) {
-  const database = request.result
-  if (!database.objectStoreNames.contains(storeName)) {
-    database.createObjectStore(storeName)
-  }
+/**
+ * Promisified `indexedDB.open`, creating `storeName` whenever an upgrade
+ * transaction is available.
+ */
+function requestOpen(
+  databaseName: string,
+  version: number | undefined,
+  storeName: string,
+): Promise<IDBDatabase> {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request =
+      version === undefined
+        ? indexedDB.open(databaseName)
+        : indexedDB.open(databaseName, version)
+    let settled = false
+
+    request.onupgradeneeded = () => {
+      const database = request.result
+      if (!database.objectStoreNames.contains(storeName)) {
+        database.createObjectStore(storeName)
+      }
+    }
+    request.onerror = () => {
+      settled = true
+      reject(request.error)
+    }
+    // Another tab holding an old connection blocks the upgrade; fail fast
+    // instead of hanging forever.
+    request.onblocked = () => {
+      settled = true
+      reject(new Error(`IndexedDB upgrade blocked: ${databaseName}`))
+    }
+    request.onsuccess = () => {
+      // A blocked upgrade still succeeds once the other tab lets go. Nobody is
+      // waiting on it any more, so close it rather than leak a connection that
+      // would go on to block every later upgrade.
+      if (settled) {
+        request.result.close()
+        return
+      }
+      settled = true
+      resolve(request.result)
+    }
+  })
 }
 
 /**
@@ -89,15 +168,33 @@ function createStoreIfMissing(request: IDBOpenDBRequest, storeName: string) {
  * mode. Centralizes the connection → transaction → object store dance so
  * higher-level operations stay one-liners.
  */
-export function withStore<T>(
+export async function withStore<T>(
   databaseName: string,
   storeName: string,
   mode: IDBTransactionMode,
   callback: (store: IDBObjectStore) => T | PromiseLike<T>,
 ): Promise<T> {
-  return getConnection(databaseName, storeName).then((database) =>
-    callback(database.transaction(storeName, mode).objectStore(storeName)),
-  )
+  for (let attempt = 0; ; attempt++) {
+    const database = await ensureStore(databaseName, storeName)
+    try {
+      return await callback(
+        database.transaction(storeName, mode).objectStore(storeName),
+      )
+    } catch (error) {
+      // Another tab's upgrade can close the connection between resolving it and
+      // using it. Reconnect once — every operation routed through here is
+      // idempotent, so a retry is safe.
+      if (attempt > 0 || !isClosedConnection(error)) throw error
+      // `onversionchange` normally evicts the entry already; drop it here too
+      // in case the connection died without firing either handler.
+      databases.delete(databaseName)
+    }
+  }
+}
+
+/** A transaction on a connection that has already been closed. */
+function isClosedConnection(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'InvalidStateError'
 }
 
 /** Read request: resolve as soon as the result is available (`onsuccess`). */
@@ -135,17 +232,23 @@ export function commitTransaction(request: IDBRequest): Promise<void> {
 
 /**
  * Delete an entire database (e.g. logout cleanup or schema migration). Closes
- * this module's cached connections first, otherwise the delete is blocked by
- * our own open connection.
+ * this module's cached connection first, otherwise the delete is blocked by our
+ * own open connection. No-op when IndexedDB is unavailable.
  */
-export function deleteDatabase(databaseName: string): Promise<void> {
-  const prefix = `${databaseName}::`
-  for (const [key, connection] of connections) {
-    if (key.startsWith(prefix)) {
-      connection.then((db) => db.close()).catch(() => {})
-      connections.delete(key)
-    }
+export async function deleteDatabase(databaseName: string): Promise<void> {
+  if (!isIndexedDBAvailable()) return
+
+  const entry = databases.get(databaseName)
+  databases.delete(databaseName)
+  // Await the close: scheduling it is not enough, since a connection still in
+  // its opening phase would otherwise block the delete request below.
+  if (entry) {
+    await entry.connection.then(
+      (database) => database.close(),
+      () => {},
+    )
   }
+
   return new Promise<void>((resolve, reject) => {
     const request = indexedDB.deleteDatabase(databaseName)
     request.onsuccess = () => resolve()
@@ -157,12 +260,14 @@ export function deleteDatabase(databaseName: string): Promise<void> {
 
 /**
  * Clear every row in the store while keeping the database and its schema.
- * Lighter than `deleteDatabase` when you only need to drop the data.
+ * Lighter than `deleteDatabase` when you only need to drop the data. No-op when
+ * IndexedDB is unavailable.
  */
-export function clearStore(
+export async function clearStore(
   databaseName: string,
   storeName: string,
 ): Promise<void> {
+  if (!isIndexedDBAvailable()) return
   return withStore(databaseName, storeName, 'readwrite', (store) =>
     commitTransaction(store.clear()),
   )
@@ -171,11 +276,13 @@ export function clearStore(
 /**
  * List all row keys currently held in the store. Handy for inspecting or
  * managing several persisted stores that share the same database + store.
+ * Resolves with an empty array when IndexedDB is unavailable.
  */
-export function storeKeys<KeyType extends IDBValidKey = IDBValidKey>(
+export async function storeKeys<KeyType extends IDBValidKey = IDBValidKey>(
   databaseName: string,
   storeName: string,
 ): Promise<KeyType[]> {
+  if (!isIndexedDBAvailable()) return []
   return withStore(databaseName, storeName, 'readonly', (store) =>
     // getAllKeys() is typed as IDBValidKey[]; narrow to the caller's KeyType.
     promisifyRequest(store.getAllKeys() as unknown as IDBRequest<KeyType[]>),
