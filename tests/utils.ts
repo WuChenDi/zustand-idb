@@ -1,11 +1,11 @@
-import { openDatabase, promisifyRequest } from '../src/db'
+import { ensureStore, promisifyRequest } from '../src/db'
 
 export async function getRow<T>(
   databaseName: string,
   storeName: string,
   rowKey: string,
 ) {
-  const database = await openDatabase(databaseName, storeName)
+  const database = await ensureStore(databaseName, storeName)
   const store = database
     .transaction(storeName, 'readonly')
     .objectStore(storeName)
