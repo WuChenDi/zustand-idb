@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "incremental": true,
+    "noErrorTruncation": true,
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "lib": ["esnext", "dom"],
+    "types": ["node"]
+  },
+  "include": ["src"],
+  "exclude": [
+    "node_modules",
+    "**/dist",
+    "**/build",
+    "**/.next",
+    "**/.out",
+    "**/.wrangler",
+    "**/.turbo",
+    "**/.cache",
+    "src/components/reactbits/**",
+    "tmp"
+  ]
+}

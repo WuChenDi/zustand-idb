@@ -1,0 +1,73 @@
+{
+  "name": "@cdlab/zustand-idb",
+  "type": "module",
+  "version": "0.0.1",
+  "packageManager": "pnpm@11.18.0",
+  "description": "Persist Zustand stores in IndexedDB.",
+  "author": "wudi <wuchendi96@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/WuChenDi/zustand-idb",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WuChenDi/zustand-idb.git"
+  },
+  "bugs": {
+    "url": "https://github.com/WuChenDi/zustand-idb/issues"
+  },
+  "keywords": [
+    "zustand",
+    "indexeddb",
+    "idb",
+    "db",
+    "persist",
+    "serializable"
+  ],
+  "exports": {
+    ".": {
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      },
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      }
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "test": "vitest --run",
+    "lint": "biome check",
+    "format": "biome format --write",
+    "clean": "bash ./scripts/clean.sh",
+    "typecheck": "tsc --project tsconfig.typecheck.json"
+  },
+  "peerDependencies": {
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.6",
+    "@types/node": "^26.1.2",
+    "fake-indexeddb": "^6.2.2",
+    "tsdown": "^0.22.14",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10",
+    "zustand": "^5.0.14"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
