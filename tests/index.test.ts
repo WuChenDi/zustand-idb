@@ -131,9 +131,12 @@ describe('createIndexedDBStorage', () => {
       await untilHydrated(store)
       await store.setState(() => ({ name: 'Kaley' }))
 
-      await store.persist.clearStorage()
+      // Zustand's `clearStorage(): void` drops the promise our `removeItem`
+      // returns, so there is nothing to await here — poll for the row to go
+      // away rather than depend on how many ticks the delete happens to take.
+      store.persist.clearStorage()
 
-      await expect(getRow(task.id, 'store', 'user')).resolves.toBeUndefined()
+      await expect.poll(() => getRow(task.id, 'store', 'user')).toBeUndefined()
     })
   })
 
@@ -142,6 +145,7 @@ describe('createIndexedDBStorage', () => {
       const original = globalThis.indexedDB
       // Simulate an environment without IndexedDB (private mode, SSR, ...).
       globalThis.indexedDB = undefined as unknown as IDBFactory
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       try {
         const store = createUserStore(task.id, 'store', 'user')
         await untilHydrated(store)
@@ -151,8 +155,55 @@ describe('createIndexedDBStorage', () => {
         // State stays usable in memory even though nothing is persisted.
         expect(store.getState()).toEqual({ name: 'Kaley' })
       } finally {
+        warn.mockRestore()
         globalThis.indexedDB = original
       }
+    })
+
+    it('falls back when IndexedDB exists but refuses to open', async ({
+      task,
+    }) => {
+      const original = globalThis.indexedDB
+      // Firefox private mode / Safari ITP: the global is present, but opening
+      // throws. Sniffing `typeof indexedDB` would miss this and hydration would
+      // hang forever.
+      globalThis.indexedDB = {
+        open() {
+          throw new DOMException('denied', 'InvalidStateError')
+        },
+      } as unknown as IDBFactory
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const store = createUserStore(task.id, 'store', 'user')
+        await untilHydrated(store)
+
+        expect(store.persist.hasHydrated()).toBe(true)
+        await store.setState(() => ({ name: 'Kaley' }))
+        expect(store.getState()).toEqual({ name: 'Kaley' })
+        // The degradation must be visible, not silent.
+        expect(warn).toHaveBeenCalledOnce()
+      } finally {
+        warn.mockRestore()
+        globalThis.indexedDB = original
+      }
+    })
+
+    it('surfaces write errors instead of degrading to memory', async ({
+      task,
+    }) => {
+      const storage = createIndexedDBStorage<{ value: unknown }>(
+        task.id,
+        'store',
+      )
+      // A failure raised *inside* a transaction is a real error, not a signal
+      // that IndexedDB is unusable; masking it would silently stop persisting.
+      await expect(
+        storage.setItem('user', { state: { value: () => {} }, version: 0 }),
+      ).rejects.toThrow(/could not be cloned/)
+
+      // IndexedDB must still be the backend afterwards.
+      await storage.setItem('user', { state: { value: 1 }, version: 0 })
+      await expect(storeKeys(task.id, 'store')).resolves.toEqual(['user'])
     })
   })
 })
