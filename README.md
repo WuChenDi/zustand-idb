@@ -125,6 +125,36 @@ await storeKeys('my-app', 'stores') // => ['files', 'user']
 
 You don't. The point of IndexedDB here is to persist **non-serializable** data. If your state is JSON-serializable, a regular web storage (`localStorage`, `sessionStorage`) with `createJSONStorage` is simpler.
 
+### Why does Next.js log `IndexedDB is unavailable` on startup?
+
+```
+[zustand-idb] IndexedDB is unavailable for "my-app/stores"; falling back to
+in-memory storage. State will not be persisted. Error: IndexedDB is not
+available in this environment
+```
+
+`persist` hydrates the store as soon as it is created. In an SSR framework such as Next.js the module is also evaluated on the server, where IndexedDB does not exist — so that first hydration probes IndexedDB, fails, and warns. Nothing is broken (the server transparently falls back to in-memory), but the warning is noisy because persisting on the server makes no sense anyway.
+
+Skip the automatic hydration and trigger it once on the client instead:
+
+```ts
+const useStore = create(
+  persist(() => ({ /* ... */ }), {
+    name: 'stores',
+    storage: createIndexedDBStorage('my-app', 'stores'),
+    // IndexedDB is browser-only: don't hydrate during SSR.
+    skipHydration: true,
+  }),
+)
+
+// Runs only in the browser, so the server never touches IndexedDB.
+if (typeof window !== 'undefined') {
+  void useStore.persist.rehydrate()
+}
+```
+
+`skipHydration` defers the initial load; `hasHydrated()` / `onFinishHydration()` still fire once the client-side `rehydrate()` completes, so gate any UI that needs the persisted value on those.
+
 ## Development
 
 ```bash
