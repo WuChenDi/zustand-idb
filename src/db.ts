@@ -17,6 +17,14 @@ const databases = new Map<string, DatabaseEntry>()
 const MAX_OPEN_ATTEMPTS = 5
 
 /**
+ * WebKit intermittently aborts a Blob/File write while "preparing" the data;
+ * the identical value stores fine on a later attempt. Bound the retries and
+ * back off a little between them so a genuinely stuck write still surfaces.
+ */
+const MAX_BLOB_WRITE_RETRIES = 3
+const BLOB_RETRY_DELAY_MS = 50
+
+/**
  * IndexedDB is missing entirely in SSR and some sandboxed contexts. Note that
  * "present" does not imply "usable": `open()` still throws in Firefox private
  * mode, which is why callers must also handle a rejected connection.
@@ -174,7 +182,9 @@ export async function withStore<T>(
   mode: IDBTransactionMode,
   callback: (store: IDBObjectStore) => T | PromiseLike<T>,
 ): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
+  let reconnected = false
+  let blobRetries = 0
+  for (;;) {
     const database = await ensureStore(databaseName, storeName)
     try {
       return await callback(
@@ -184,10 +194,24 @@ export async function withStore<T>(
       // Another tab's upgrade can close the connection between resolving it and
       // using it. Reconnect once — every operation routed through here is
       // idempotent, so a retry is safe.
-      if (attempt > 0 || !isClosedConnection(error)) throw error
-      // `onversionchange` normally evicts the entry already; drop it here too
-      // in case the connection died without firing either handler.
-      databases.delete(databaseName)
+      if (!reconnected && isClosedConnection(error)) {
+        reconnected = true
+        // `onversionchange` normally evicts the entry already; drop it here too
+        // in case the connection died without firing either handler.
+        databases.delete(databaseName)
+        continue
+      }
+      // WebKit intermittently aborts a Blob/File write while "preparing" the
+      // data; the same value stores fine moments later. Retry a bounded number
+      // of times with a short backoff, keeping the connection as-is (only the
+      // transaction aborted). Once the budget is spent the error surfaces, so a
+      // genuinely failing write is never silently dropped.
+      if (isTransientBlobError(error) && blobRetries < MAX_BLOB_WRITE_RETRIES) {
+        blobRetries++
+        await delay(BLOB_RETRY_DELAY_MS * blobRetries)
+        continue
+      }
+      throw error
     }
   }
 }
@@ -195,6 +219,22 @@ export async function withStore<T>(
 /** A transaction on a connection that has already been closed. */
 function isClosedConnection(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'InvalidStateError'
+}
+
+/**
+ * WebKit's transient Blob/File write failure. Matched by message because the
+ * DOMException name (`UnknownError`) is far too broad to key off of, while the
+ * message is a fixed English constant across WebKit versions.
+ */
+function isTransientBlobError(error: unknown): boolean {
+  return (
+    error instanceof DOMException && error.message.includes('Blob/File data')
+  )
+}
+
+/** Resolve after `ms` milliseconds; used to back off between write retries. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 /** Read request: resolve as soon as the result is available (`onsuccess`). */
