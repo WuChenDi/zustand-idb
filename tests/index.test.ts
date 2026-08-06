@@ -7,7 +7,7 @@ import {
   deleteDatabase,
   storeKeys,
 } from '../src'
-import { ensureStore } from '../src/db'
+import { ensureStore, withStore } from '../src/db'
 import { getRow } from './utils'
 
 interface User {
@@ -324,6 +324,40 @@ describe('without IndexedDB', () => {
     } finally {
       globalThis.indexedDB = original
     }
+  })
+})
+
+describe("WebKit's transient Blob/File write bug", () => {
+  const blobError = () =>
+    new DOMException(
+      'Error preparing Blob/File data to be stored in object store',
+      'UnknownError',
+    )
+
+  it('retries the write until it succeeds', async ({ task }) => {
+    let calls = 0
+    const result = await withStore(task.id, 'store', 'readwrite', () => {
+      calls++
+      // Fail the way WebKit does on the first attempts, then let it through.
+      if (calls < 3) throw blobError()
+      return 'stored'
+    })
+
+    expect(calls).toBe(3)
+    expect(result).toBe('stored')
+  })
+
+  it('surfaces the error once the retry budget is spent', async ({ task }) => {
+    let calls = 0
+    await expect(
+      withStore(task.id, 'store', 'readwrite', () => {
+        calls++
+        throw blobError()
+      }),
+    ).rejects.toThrow(/Blob\/File data/)
+
+    // Initial attempt plus the bounded retries — never an unbounded loop.
+    expect(calls).toBe(4)
   })
 })
 
