@@ -295,6 +295,45 @@ describe('multiple object stores in one database', () => {
     }
   })
 
+  it('retries a blocked upgrade until it clears', async ({ task }) => {
+    // Seed the database so creating `store-a` needs a version bump (the call
+    // that can be blocked by another tab's still-open connection).
+    await ensureStore(task.id, 'seed')
+
+    const realOpen = indexedDB.open.bind(indexedDB)
+    let blockedOnce = false
+    const open = vi.spyOn(indexedDB, 'open').mockImplementation(((
+      name: string,
+      version?: number,
+    ) => {
+      // Block the first upgrade attempt the way another tab would, then let the
+      // retry through.
+      if (version !== undefined && !blockedOnce) {
+        blockedOnce = true
+        const request = {
+          onblocked: null,
+          onsuccess: null,
+          onerror: null,
+          onupgradeneeded: null,
+          result: null,
+          error: null,
+        } as unknown as IDBOpenDBRequest
+        queueMicrotask(() => request.onblocked?.(new Event('blocked') as never))
+        return request
+      }
+      return realOpen(name, version)
+    }) as typeof indexedDB.open)
+
+    try {
+      const database = await ensureStore(task.id, 'store-a')
+
+      expect(blockedOnce).toBe(true)
+      expect(database.objectStoreNames.contains('store-a')).toBe(true)
+    } finally {
+      open.mockRestore()
+    }
+  })
+
   it('adds a store to a database that is already open', async ({ task }) => {
     const a = createIndexedDBStorage<User>(task.id, 'store-a')
     await a.setItem('user', { state: { name: 'Ann' }, version: VERSION })
@@ -327,19 +366,34 @@ describe('without IndexedDB', () => {
   })
 })
 
-describe("WebKit's transient Blob/File write bug", () => {
-  const blobError = () =>
+describe('transient Blob/File write bug', () => {
+  const webkitBlobError = () =>
     new DOMException(
       'Error preparing Blob/File data to be stored in object store',
       'UnknownError',
     )
+  const chromiumBlobError = () =>
+    new DOMException('Failed to write blobs (InvalidBlob)', 'UnknownError')
 
-  it('retries the write until it succeeds', async ({ task }) => {
+  it('retries the WebKit write until it succeeds', async ({ task }) => {
     let calls = 0
     const result = await withStore(task.id, 'store', 'readwrite', () => {
       calls++
       // Fail the way WebKit does on the first attempts, then let it through.
-      if (calls < 3) throw blobError()
+      if (calls < 3) throw webkitBlobError()
+      return 'stored'
+    })
+
+    expect(calls).toBe(3)
+    expect(result).toBe('stored')
+  })
+
+  it('retries the Chromium write until it succeeds', async ({ task }) => {
+    let calls = 0
+    const result = await withStore(task.id, 'store', 'readwrite', () => {
+      calls++
+      // Fail the way Chromium does on the first attempts, then let it through.
+      if (calls < 3) throw chromiumBlobError()
       return 'stored'
     })
 
@@ -352,9 +406,9 @@ describe("WebKit's transient Blob/File write bug", () => {
     await expect(
       withStore(task.id, 'store', 'readwrite', () => {
         calls++
-        throw blobError()
+        throw chromiumBlobError()
       }),
-    ).rejects.toThrow(/Blob\/File data/)
+    ).rejects.toThrow(/Failed to write blobs/)
 
     // Initial attempt plus the bounded retries — never an unbounded loop.
     expect(calls).toBe(4)
