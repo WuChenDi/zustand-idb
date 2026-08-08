@@ -17,12 +17,19 @@ const databases = new Map<string, DatabaseEntry>()
 const MAX_OPEN_ATTEMPTS = 5
 
 /**
- * WebKit intermittently aborts a Blob/File write while "preparing" the data;
- * the identical value stores fine on a later attempt. Bound the retries and
- * back off a little between them so a genuinely stuck write still surfaces.
+ * WebKit and Chromium both intermittently abort a Blob/File write; the
+ * identical value stores fine on a later attempt. Bound the retries and back
+ * off a little between them so a genuinely stuck write still surfaces.
  */
 const MAX_BLOB_WRITE_RETRIES = 3
 const BLOB_RETRY_DELAY_MS = 50
+
+/**
+ * A blocked open/upgrade is transient: another tab is holding an older
+ * connection and is being asked to close it. Back off between retries so it has
+ * a moment to let go before we give up.
+ */
+const BLOCKED_RETRY_DELAY_MS = 50
 
 /**
  * IndexedDB is missing entirely in SSR and some sandboxed contexts. Note that
@@ -103,21 +110,34 @@ async function openWithStore(
   }
 
   for (let attempt = 0; attempt < MAX_OPEN_ATTEMPTS; attempt++) {
-    // No explicit version: open the current version, or create the database
-    // (version 1, firing `upgradeneeded`) when it does not exist yet.
-    const database = await requestOpen(databaseName, undefined, storeName)
-    if (database.objectStoreNames.contains(storeName)) return database
+    try {
+      // No explicit version: open the current version, or create the database
+      // (version 1, firing `upgradeneeded`) when it does not exist yet.
+      const database = await requestOpen(databaseName, undefined, storeName)
+      if (database.objectStoreNames.contains(storeName)) return database
 
-    // Database exists but the store is missing: reopen at the next version to
-    // trigger `upgradeneeded` and create the store.
-    const nextVersion = database.version + 1
-    database.close()
+      // Database exists but the store is missing: reopen at the next version to
+      // trigger `upgradeneeded` and create the store.
+      const nextVersion = database.version + 1
+      database.close()
 
-    const upgraded = await requestOpen(databaseName, nextVersion, storeName)
-    // Another tab may have claimed this version number first, in which case our
-    // `upgradeneeded` never ran and the store is still missing. Start over.
-    if (upgraded.objectStoreNames.contains(storeName)) return upgraded
-    upgraded.close()
+      const upgraded = await requestOpen(databaseName, nextVersion, storeName)
+      // Another tab may have claimed this version number first, in which case
+      // our `upgradeneeded` never ran and the store is still missing. Retry.
+      if (upgraded.objectStoreNames.contains(storeName)) return upgraded
+      upgraded.close()
+    } catch (error) {
+      // A block is transient: another tab holds an older connection and its
+      // `onversionchange` is being asked to close it. Back off and retry within
+      // the attempt budget instead of failing the whole open (this also keeps a
+      // momentary block during the first probe from demoting the session to
+      // in-memory storage). A block that outlives the budget still surfaces.
+      if (isBlocked(error) && attempt < MAX_OPEN_ATTEMPTS - 1) {
+        await delay(BLOCKED_RETRY_DELAY_MS * (attempt + 1))
+        continue
+      }
+      throw error
+    }
   }
 
   throw new Error(
@@ -151,11 +171,12 @@ function requestOpen(
       settled = true
       reject(request.error)
     }
-    // Another tab holding an old connection blocks the upgrade; fail fast
-    // instead of hanging forever.
+    // Another tab holding an old connection blocks the upgrade. Reject with a
+    // tagged error so `openWithStore` can retry a bounded number of times (the
+    // other tab usually closes on `onversionchange`) rather than hang forever.
     request.onblocked = () => {
       settled = true
-      reject(new Error(`IndexedDB upgrade blocked: ${databaseName}`))
+      reject(blockedError(databaseName))
     }
     request.onsuccess = () => {
       // A blocked upgrade still succeeds once the other tab lets go. Nobody is
@@ -221,14 +242,29 @@ function isClosedConnection(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'InvalidStateError'
 }
 
+/** Build the tagged error used to signal (and later detect) a blocked upgrade. */
+function blockedError(databaseName: string): Error {
+  const error = new Error(`IndexedDB upgrade blocked: ${databaseName}`)
+  error.name = 'BlockedError'
+  return error
+}
+
+/** A `blockedError` raised while another tab held the database open. */
+function isBlocked(error: unknown): boolean {
+  return error instanceof Error && error.name === 'BlockedError'
+}
+
 /**
- * WebKit's transient Blob/File write failure. Matched by message because the
+ * A transient Blob/File write failure. Matched by message because the
  * DOMException name (`UnknownError`) is far too broad to key off of, while the
- * message is a fixed English constant across WebKit versions.
+ * messages are fixed English constants: WebKit reports "Blob/File data" and
+ * Chromium reports "Failed to write blobs".
  */
 function isTransientBlobError(error: unknown): boolean {
   return (
-    error instanceof DOMException && error.message.includes('Blob/File data')
+    error instanceof DOMException &&
+    (error.message.includes('Blob/File data') ||
+      error.message.includes('Failed to write blobs'))
   )
 }
 
