@@ -155,6 +155,23 @@ if (typeof window !== 'undefined') {
 
 `skipHydration` defers the initial load; `hasHydrated()` / `onFinishHydration()` still fire once the client-side `rehydrate()` completes, so gate any UI that needs the persisted value on those.
 
+### Does it work in private / incognito mode?
+
+Yes, but persistence guarantees differ by browser and are outside this package's control:
+
+- **Firefox private mode** refuses to open IndexedDB at all. The connection probe fails and this package transparently falls back to in-memory storage — state stays usable for the session but is never persisted.
+- **Chrome / Edge incognito** allow IndexedDB, so everything works normally, but the entire database is discarded when the last incognito window closes. Persistence is real within the session only.
+
+Nothing here throws; just don't rely on data outliving the private session.
+
+### My data disappears in Safari after a while
+
+Safari's [Intelligent Tracking Prevention](https://webkit.org/tracking-prevention/) evicts script-writable storage — including IndexedDB — after **7 days** without user interaction with the site. This is a browser policy, not a bug in this package: reads simply start returning `null` (no error is raised), so treat persisted values as a cache that can vanish and always keep a sensible default in your initial state.
+
+### What happens when several tabs are open?
+
+Handled cooperatively. Each database uses one shared, cached connection that listens for `versionchange` and steps aside so another tab can upgrade or delete without being blocked. A store creation that loses a version race, or an upgrade momentarily blocked by another tab's connection, is retried a bounded number of times, so the connection you get always exposes the store you asked for. Writes on the shared connection commit in call order, keeping rapid successive writes from landing out of order.
+
 ## Development
 
 ```bash
