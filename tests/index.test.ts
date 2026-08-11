@@ -415,6 +415,87 @@ describe('transient Blob/File write bug', () => {
   })
 })
 
+describe('error context', () => {
+  /** A value structured clone refuses, so the write fails inside the store. */
+  const unclonable = () => ({ state: { value: () => {} }, version: 0 })
+
+  it('names the operation, row and store that failed', async ({ task }) => {
+    const storage = createIndexedDBStorage<{ value: unknown }>(task.id, 'store')
+
+    const error = await storage.setItem('user', unclonable()).catch((e) => e)
+
+    // A monitoring report only carries `error.message`; it has to be enough to
+    // locate the failing store on its own.
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toContain(`setItem "user" on "${task.id}/store"`)
+  })
+
+  it('keeps the original error as the cause', async ({ task }) => {
+    const storage = createIndexedDBStorage<{ value: unknown }>(task.id, 'store')
+
+    const error = await storage.setItem('user', unclonable()).catch((e) => e)
+
+    expect(error.cause).toBeInstanceOf(DOMException)
+    expect(error.message).toContain((error.cause as DOMException).message)
+  })
+
+  it('tags a blob write that outlives the retry budget', async ({ task }) => {
+    const storage = createIndexedDBStorage<User>(task.id, 'store')
+    await ensureStore(task.id, 'store')
+
+    // Fail every attempt the way Chromium does, so the retries run out and the
+    // error reaches the caller — the case that motivated tagging in the first
+    // place, where `message` is all a production report has to go on.
+    const transaction = vi
+      .spyOn(IDBDatabase.prototype, 'transaction')
+      .mockImplementation(() => {
+        throw new DOMException(
+          'Failed to write blobs (IOError)',
+          'UnknownError',
+        )
+      })
+
+    try {
+      const error = await storage
+        .setItem('user', { state: { name: 'Ann' }, version: VERSION })
+        .catch((e) => e)
+
+      expect(error.message).toContain(`setItem "user" on "${task.id}/store"`)
+      expect(error.message).toContain('Failed to write blobs (IOError)')
+      // The failure class stays branchable instead of collapsing to "Error".
+      expect(error.name).toBe('UnknownError')
+    } finally {
+      transaction.mockRestore()
+    }
+  })
+
+  it('keeps the failure class branchable for callers', async ({ task }) => {
+    const storage = createIndexedDBStorage<{ value: unknown }>(task.id, 'store')
+
+    const error = await storage.setItem('user', unclonable()).catch((e) => e)
+
+    // Consumers branch on `name` (e.g. 'QuotaExceededError' to detect a full
+    // disk); wrapping must not flatten that to a generic "Error".
+    expect(error.name).toBe('DataCloneError')
+  })
+
+  it('tags the helpers too', async ({ task }) => {
+    const original = globalThis.indexedDB
+    globalThis.indexedDB = {
+      open() {
+        throw new DOMException('denied', 'InvalidStateError')
+      },
+    } as unknown as IDBFactory
+    try {
+      await expect(storeKeys(task.id, 'store')).rejects.toThrow(
+        `storeKeys on "${task.id}/store"`,
+      )
+    } finally {
+      globalThis.indexedDB = original
+    }
+  })
+})
+
 describe('storeKeys', () => {
   it('returns an empty array for an untouched store', async ({ task }) => {
     await expect(storeKeys(task.id, 'store')).resolves.toEqual([])

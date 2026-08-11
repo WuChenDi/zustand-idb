@@ -1,8 +1,10 @@
 import type { PersistStorage, StorageValue } from 'zustand/middleware/persist'
 import {
   commitTransaction,
+  describeStore,
   ensureStore,
   promisifyRequest,
+  tagFailure,
   withStore,
 } from './db'
 
@@ -45,27 +47,41 @@ export function createIndexedDBStorage<S>(
   databaseName: string,
   storeName: string,
 ): PersistStorage<S, Promise<void>> {
+  /** Tag every failure with the operation and row it came from. */
+  const scoped = <T>(
+    operation: string,
+    rowKey: string,
+    run: () => Promise<T>,
+  ): Promise<T> =>
+    tagFailure(describeStore(databaseName, storeName, operation, rowKey), run)
+
   const indexedDBStorage: PersistStorage<S, Promise<void>> = {
-    async getItem(name) {
-      const value = await withStore(
-        databaseName,
-        storeName,
-        'readonly',
-        (store) =>
-          promisifyRequest<StorageValue<S> | undefined>(store.get(name)),
-      )
-      return value ?? null
+    getItem(name) {
+      return scoped('getItem', name, async () => {
+        const value = await withStore(
+          databaseName,
+          storeName,
+          'readonly',
+          (store) =>
+            promisifyRequest<StorageValue<S> | undefined>(store.get(name)),
+        )
+        return value ?? null
+      })
     },
 
     setItem(name, value) {
-      return withStore(databaseName, storeName, 'readwrite', (store) =>
-        commitTransaction(store.put(value, name)),
+      return scoped('setItem', name, () =>
+        withStore(databaseName, storeName, 'readwrite', (store) =>
+          commitTransaction(store.put(value, name)),
+        ),
       )
     },
 
     removeItem(name) {
-      return withStore(databaseName, storeName, 'readwrite', (store) =>
-        commitTransaction(store.delete(name)),
+      return scoped('removeItem', name, () =>
+        withStore(databaseName, storeName, 'readwrite', (store) =>
+          commitTransaction(store.delete(name)),
+        ),
       )
     },
   }
