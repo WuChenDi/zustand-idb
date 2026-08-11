@@ -176,7 +176,7 @@ function requestOpen(
     // other tab usually closes on `onversionchange`) rather than hang forever.
     request.onblocked = () => {
       settled = true
-      reject(blockedError(databaseName))
+      reject(blockedError(`upgrade for "${databaseName}"`))
     }
     request.onsuccess = () => {
       // A blocked upgrade still succeeds once the other tab lets go. Nobody is
@@ -237,14 +237,71 @@ export async function withStore<T>(
   }
 }
 
+/**
+ * Run `operation` and re-throw any failure tagged with where it came from.
+ *
+ * IndexedDB reports failures as bare `DOMException`s: no stack, and a message
+ * ("Failed to write blobs (IOError)") naming neither the database, the store,
+ * nor the row. A production report built from `error.message` alone is then
+ * unactionable, so prefix the context and keep the original as `cause`.
+ *
+ * The original's `name` is carried over: callers branch on
+ * `error.name === 'QuotaExceededError'`, and a wrapper left named "Error" would
+ * fail that check silently — turning "disk is full" into an unrecognized error
+ * rather than a loud one.
+ */
+export async function tagFailure<T>(
+  description: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation()
+  } catch (error) {
+    const tagged = new Error(
+      `[zustand-idb] ${description} failed: ${detail(error)}`,
+      { cause: error },
+    )
+    if (error instanceof Error && error.name !== 'Error') {
+      tagged.name = error.name
+    }
+    throw tagged
+  }
+}
+
+/**
+ * The readable part of a thrown value. Keeps the `DOMException` name, which
+ * carries the actual failure class (`QuotaExceededError`, `UnknownError`, …),
+ * but drops the noise of a plain `Error` always being named "Error".
+ */
+function detail(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  return error.name && error.name !== 'Error'
+    ? `${error.name}: ${error.message}`
+    : error.message
+}
+
+/** Describe a store-scoped operation for {@link tagFailure}. */
+export function describeStore(
+  databaseName: string,
+  storeName: string,
+  operation: string,
+  rowKey?: string,
+): string {
+  const target = rowKey === undefined ? '' : ` "${rowKey}"`
+  return `${operation}${target} on "${databaseName}/${storeName}"`
+}
+
 /** A transaction on a connection that has already been closed. */
 function isClosedConnection(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'InvalidStateError'
 }
 
-/** Build the tagged error used to signal (and later detect) a blocked upgrade. */
-function blockedError(databaseName: string): Error {
-  const error = new Error(`IndexedDB upgrade blocked: ${databaseName}`)
+/**
+ * Build the tagged error used to signal (and later detect) an operation blocked
+ * by a connection held elsewhere, typically another tab.
+ */
+function blockedError(what: string): Error {
+  const error = new Error(`IndexedDB ${what} blocked by another connection`)
   error.name = 'BlockedError'
   return error
 }
@@ -325,13 +382,17 @@ export async function deleteDatabase(databaseName: string): Promise<void> {
     )
   }
 
-  return new Promise<void>((resolve, reject) => {
-    const request = indexedDB.deleteDatabase(databaseName)
-    request.onsuccess = () => resolve()
-    request.onerror = () => reject(request.error)
-    request.onblocked = () =>
-      reject(new Error(`IndexedDB delete blocked: ${databaseName}`))
-  })
+  return tagFailure(
+    `deleteDatabase "${databaseName}"`,
+    () =>
+      new Promise<void>((resolve, reject) => {
+        const request = indexedDB.deleteDatabase(databaseName)
+        request.onsuccess = () => resolve()
+        request.onerror = () => reject(request.error)
+        // `tagFailure` already names the database; don't repeat it here.
+        request.onblocked = () => reject(blockedError('delete'))
+      }),
+  )
 }
 
 /**
@@ -344,8 +405,10 @@ export async function clearStore(
   storeName: string,
 ): Promise<void> {
   if (!isIndexedDBAvailable()) return
-  return withStore(databaseName, storeName, 'readwrite', (store) =>
-    commitTransaction(store.clear()),
+  return tagFailure(describeStore(databaseName, storeName, 'clearStore'), () =>
+    withStore(databaseName, storeName, 'readwrite', (store) =>
+      commitTransaction(store.clear()),
+    ),
   )
 }
 
@@ -359,8 +422,10 @@ export async function storeKeys<KeyType extends IDBValidKey = IDBValidKey>(
   storeName: string,
 ): Promise<KeyType[]> {
   if (!isIndexedDBAvailable()) return []
-  return withStore(databaseName, storeName, 'readonly', (store) =>
-    // getAllKeys() is typed as IDBValidKey[]; narrow to the caller's KeyType.
-    promisifyRequest(store.getAllKeys() as unknown as IDBRequest<KeyType[]>),
+  return tagFailure(describeStore(databaseName, storeName, 'storeKeys'), () =>
+    withStore(databaseName, storeName, 'readonly', (store) =>
+      // getAllKeys() is typed as IDBValidKey[]; narrow to the caller's KeyType.
+      promisifyRequest(store.getAllKeys() as unknown as IDBRequest<KeyType[]>),
+    ),
   )
 }
