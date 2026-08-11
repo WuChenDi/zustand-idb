@@ -22,6 +22,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # `pnpm test` drives a real browser now, so the release gate cannot run
+      # without these. Without this step the Test step fails outright and
+      # nothing is ever published.
+      - name: Install browsers
+        run: pnpm browsers --only-shell
+
       - name: Lint
         run: pnpm lint
 
