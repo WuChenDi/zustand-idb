@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createIndexedDBStorage, deleteDatabase, storeKeys } from '../src'
-import { ensureStore } from '../src/db'
+import { ensureStore, withStore } from '../src/db'
 import type { User } from './utils'
 import { VERSION } from './utils'
 
@@ -282,5 +282,35 @@ describe('cross-connection cooperation', () => {
     } finally {
       outsider.close()
     }
+  })
+})
+
+describe('connection cache invalidation', () => {
+  it('keeps one connection per database when a dead one is evicted', async ({
+    task,
+  }) => {
+    const dead = await ensureStore(task.id, 'store')
+    // Kill the cached connection the way a force-close does: `close()` fires
+    // neither `close` nor `versionchange`, so the cache goes on handing it out.
+    dead.close()
+
+    // Trip over the dead connection, and in the same tick let another store
+    // install a fresh cache entry. `withStore` suspends on its first `await`,
+    // so the entry below is in place by the time the reconnect runs — and the
+    // reconnect must evict only the dead entry, never that newer one.
+    const reading = withStore(
+      task.id,
+      'store',
+      'readonly',
+      (store) => store.name,
+    )
+    const other = ensureStore(task.id, 'other')
+
+    await reading
+
+    // The documented invariant: one connection per database, shared by every
+    // store in it. Dropping a live entry here would strand its connection
+    // outside the cache and open a second one alongside it.
+    expect(await other).toBe(await ensureStore(task.id, 'other'))
   })
 })
