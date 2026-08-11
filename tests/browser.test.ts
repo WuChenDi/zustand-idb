@@ -170,20 +170,6 @@ describe('multiple object stores in one database', () => {
 })
 
 describe('non-serializable values', () => {
-  it('round-trips a Blob', async ({ task }) => {
-    const storage = createIndexedDBStorage<{ file: Blob }>(task.id, 'store')
-
-    await storage.setItem('user', {
-      state: { file: new Blob(['hello'], { type: 'text/plain' }) },
-      version: VERSION,
-    })
-
-    const loaded = await storage.getItem('user')
-    expect(loaded?.state.file).toBeInstanceOf(Blob)
-    expect(loaded?.state.file.type).toBe('text/plain')
-    await expect(loaded?.state.file.text()).resolves.toBe('hello')
-  })
-
   it('round-trips values JSON would mangle', async ({ task }) => {
     interface State {
       map: Map<string, number>
@@ -213,27 +199,6 @@ describe('non-serializable values', () => {
     expect(loaded?.state.date.toISOString()).toBe('2020-01-02T03:04:05.000Z')
     expect(loaded?.state.bytes).toBeInstanceOf(Uint8Array)
     expect([...(loaded?.state.bytes ?? [])]).toEqual([1, 2, 3])
-  })
-
-  it('round-trips a FileSystemFileHandle', async ({ task }) => {
-    // The headline use case: a handle the user picked stays usable after a
-    // reload. It only exists in a browser, and only IndexedDB can store it.
-    const root = await navigator.storage.getDirectory()
-    const handle = await root.getFileHandle('picked.txt', { create: true })
-    const writable = await handle.createWritable()
-    await writable.write('picked by the user')
-    await writable.close()
-
-    const storage = createIndexedDBStorage<{ handle: FileSystemFileHandle }>(
-      task.id,
-      'store',
-    )
-    await storage.setItem('files', { state: { handle }, version: VERSION })
-
-    const restored = (await storage.getItem('files'))?.state.handle
-    expect(restored).toBeInstanceOf(FileSystemFileHandle)
-    const file = await restored?.getFile()
-    await expect(file?.text()).resolves.toBe('picked by the user')
   })
 })
 

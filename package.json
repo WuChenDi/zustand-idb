@@ -54,7 +54,7 @@
     "lint": "biome check",
     "format": "biome format --write",
     "clean": "bash ./scripts/clean.sh",
-    "browsers": "pnpm exec playwright install chromium --with-deps",
+    "browsers": "pnpm exec playwright install chromium webkit --with-deps",
     "typecheck": "tsc --project tsconfig.typecheck.json"
   },
   "peerDependencies": {

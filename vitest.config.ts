@@ -27,7 +27,19 @@ export default defineConfig({
             enabled: true,
             headless: true,
             provider: playwright(),
-            instances: [{ browser: 'chromium' }],
+            instances: [
+              { browser: 'chromium' },
+              {
+                browser: 'webkit',
+                // Two files need capabilities this build does not have: CDP
+                // (to override the origin quota) and blob storage / OPFS.
+                // Both files say which, and how it was measured.
+                exclude: [
+                  'tests/browser-quota.test.ts',
+                  'tests/browser-chromium.test.ts',
+                ],
+              },
+            ],
             // Failures are read from the terminal here; don't litter the repo
             // with screenshot artifacts.
             screenshotFailures: false,
