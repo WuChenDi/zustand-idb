@@ -20,6 +20,9 @@ importers:
       fake-indexeddb:
         specifier: ^6.2.5
         version: 6.2.5
+      playwright:
+        specifier: ^1.62.1
+        version: 1.62.1
       tsdown:
         specifier: ^0.22.14
         version: 0.22.14(typescript@7.0.2)
