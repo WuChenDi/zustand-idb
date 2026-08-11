@@ -548,4 +548,33 @@ describe('deleteDatabase', () => {
     // Re-opening recreates an empty database + store.
     await expect(storeKeys(task.id, 'store')).resolves.toEqual([])
   })
+
+  it('rejects with a BlockedError when another tab holds the database', async ({
+    task,
+  }) => {
+    // Block the delete the way a connection held in another tab would.
+    const remove = vi
+      .spyOn(indexedDB, 'deleteDatabase')
+      .mockImplementation((() => {
+        const request = {
+          onblocked: null,
+          onsuccess: null,
+          onerror: null,
+          error: null,
+        } as unknown as IDBOpenDBRequest
+        queueMicrotask(() => request.onblocked?.(new Event('blocked') as never))
+        return request
+      }) as typeof indexedDB.deleteDatabase)
+
+    try {
+      const error = await deleteDatabase(task.id).catch((e) => e)
+
+      // Callers branch on `name` to tell "another tab is in the way" apart from
+      // a real failure; tagging must not flatten it to a generic "Error".
+      expect(error.name).toBe('BlockedError')
+      expect(error.message).toContain(`deleteDatabase "${task.id}"`)
+    } finally {
+      remove.mockRestore()
+    }
+  })
 })
