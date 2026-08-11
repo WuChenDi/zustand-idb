@@ -1,8 +1,29 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createIndexedDBStorage, storeKeys } from '../src'
+import { createIndexedDBStorage, deleteDatabase, storeKeys } from '../src'
 import { ensureStore } from '../src/db'
 import type { User } from './utils'
 import { VERSION } from './utils'
+
+/** Open a connection this module does not manage, standing in for another tab. */
+function openOutsider(
+  databaseName: string,
+  version?: number,
+  onUpgrade?: (database: IDBDatabase) => void,
+): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request =
+      version === undefined
+        ? indexedDB.open(databaseName)
+        : indexedDB.open(databaseName, version)
+    request.onupgradeneeded = () => onUpgrade?.(request.result)
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+    // An outsider that gets blocked means our own connection failed to step
+    // aside, which is the bug these tests exist to catch.
+    request.onblocked = () =>
+      reject(new Error('blocked by a connection this package holds'))
+  })
+}
 
 describe('multiple object stores in one database', () => {
   it('shares a single connection across stores', async ({ task }) => {
@@ -145,5 +166,121 @@ describe('multiple object stores in one database', () => {
       version: VERSION,
     })
     await expect(storeKeys(task.id, 'store-b')).resolves.toEqual(['user'])
+  })
+})
+
+describe('non-serializable values', () => {
+  it('round-trips a Blob', async ({ task }) => {
+    const storage = createIndexedDBStorage<{ file: Blob }>(task.id, 'store')
+
+    await storage.setItem('user', {
+      state: { file: new Blob(['hello'], { type: 'text/plain' }) },
+      version: VERSION,
+    })
+
+    const loaded = await storage.getItem('user')
+    expect(loaded?.state.file).toBeInstanceOf(Blob)
+    expect(loaded?.state.file.type).toBe('text/plain')
+    await expect(loaded?.state.file.text()).resolves.toBe('hello')
+  })
+
+  it('round-trips values JSON would mangle', async ({ task }) => {
+    interface State {
+      map: Map<string, number>
+      set: Set<string>
+      date: Date
+      bytes: Uint8Array
+    }
+    const storage = createIndexedDBStorage<State>(task.id, 'store')
+
+    await storage.setItem('user', {
+      state: {
+        map: new Map([['a', 1]]),
+        set: new Set(['x']),
+        date: new Date('2020-01-02T03:04:05.000Z'),
+        bytes: new Uint8Array([1, 2, 3]),
+      },
+      version: VERSION,
+    })
+
+    // `JSON.stringify` turns every one of these into `{}` or a string.
+    const loaded = await storage.getItem('user')
+    expect(loaded?.state.map).toBeInstanceOf(Map)
+    expect(loaded?.state.map.get('a')).toBe(1)
+    expect(loaded?.state.set).toBeInstanceOf(Set)
+    expect(loaded?.state.set.has('x')).toBe(true)
+    expect(loaded?.state.date).toBeInstanceOf(Date)
+    expect(loaded?.state.date.toISOString()).toBe('2020-01-02T03:04:05.000Z')
+    expect(loaded?.state.bytes).toBeInstanceOf(Uint8Array)
+    expect([...(loaded?.state.bytes ?? [])]).toEqual([1, 2, 3])
+  })
+
+  it('round-trips a FileSystemFileHandle', async ({ task }) => {
+    // The headline use case: a handle the user picked stays usable after a
+    // reload. It only exists in a browser, and only IndexedDB can store it.
+    const root = await navigator.storage.getDirectory()
+    const handle = await root.getFileHandle('picked.txt', { create: true })
+    const writable = await handle.createWritable()
+    await writable.write('picked by the user')
+    await writable.close()
+
+    const storage = createIndexedDBStorage<{ handle: FileSystemFileHandle }>(
+      task.id,
+      'store',
+    )
+    await storage.setItem('files', { state: { handle }, version: VERSION })
+
+    const restored = (await storage.getItem('files'))?.state.handle
+    expect(restored).toBeInstanceOf(FileSystemFileHandle)
+    const file = await restored?.getFile()
+    await expect(file?.text()).resolves.toBe('picked by the user')
+  })
+})
+
+describe('cross-connection cooperation', () => {
+  it('steps aside so another connection can upgrade', async ({ task }) => {
+    const storage = createIndexedDBStorage<User>(task.id, 'store')
+    await storage.setItem('user', {
+      state: { name: 'Ann' },
+      version: VERSION,
+    })
+    const cached = await ensureStore(task.id, 'store')
+
+    // Another tab bumps the version. `openOutsider` rejects if it is blocked,
+    // so this only resolves when our `onversionchange` really closed the
+    // cached connection.
+    const outsider = await openOutsider(task.id, cached.version + 1, (db) =>
+      db.createObjectStore('other-tab'),
+    )
+
+    try {
+      // The cache must have been invalidated, and reads keep working by
+      // transparently reconnecting.
+      await expect(storage.getItem('user')).resolves.toEqual({
+        state: { name: 'Ann' },
+        version: VERSION,
+      })
+      await expect(ensureStore(task.id, 'store')).resolves.not.toBe(cached)
+    } finally {
+      outsider.close()
+    }
+  })
+
+  it('rejects deleteDatabase while an outside connection holds it', async ({
+    task,
+  }) => {
+    await ensureStore(task.id, 'store')
+    // A connection with no `versionchange` handler — exactly the tab that does
+    // not cooperate. No mocking: this really blocks the delete.
+    const outsider = await openOutsider(task.id)
+
+    try {
+      const error = await deleteDatabase(task.id).catch((e) => e)
+
+      expect(error.name).toBe('BlockedError')
+      expect(error.message).toContain(`deleteDatabase "${task.id}"`)
+    } finally {
+      outsider.close()
+    }
   })
 })
