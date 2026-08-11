@@ -137,6 +137,8 @@ Note that `error instanceof DOMException` is `false` on the wrapper — use `err
 
 Some failures are retried internally before they ever reach you: transient Blob/File write aborts (WebKit and Chromium), a connection closed by another tab's upgrade, and an upgrade momentarily blocked by another tab. What surfaces has already outlived a bounded retry budget, so treat it as a real failure rather than jitter — `InvalidBlob` usually means the source Blob/File is no longer readable, and `IOError` points at the disk itself.
 
+One case never reaches your `catch` at all: a block that outlives the budget while the storage is still opening its *first* connection counts as a connection failure, so it degrades to in-memory storage and warns instead of rejecting. Past that first connection — and on `clearStore` / `storeKeys` / `deleteDatabase`, which never degrade — a spent block rejects with a `BlockedError`.
+
 ## How it works
 
 - **Connection cache** — one `IDBDatabase` connection is opened per `databaseName` and shared by every object store inside it. Keeping it per-database rather than per store means this package's own connections never block each other's upgrades. Transactions on a shared connection commit in call order, so rapid successive writes never land out of order.
