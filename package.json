@@ -49,9 +49,12 @@
     "build": "tsdown",
     "dev": "tsdown --watch",
     "test": "vitest --run",
+    "test:node": "vitest --run --project node",
+    "test:browser": "vitest --run --project browser",
     "lint": "biome check",
     "format": "biome format --write",
     "clean": "bash ./scripts/clean.sh",
+    "browsers": "pnpm exec playwright install chromium --with-deps",
     "typecheck": "tsc --project tsconfig.typecheck.json"
   },
   "peerDependencies": {
@@ -59,6 +62,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.7",
+    "@vitest/browser-playwright": "^4.1.10",
     "@types/node": "^26.1.2",
     "fake-indexeddb": "^6.2.5",
     "tsdown": "^0.22.14",

@@ -14,6 +14,9 @@ importers:
       '@types/node':
         specifier: ^26.1.2
         version: 26.1.2
+      '@vitest/browser-playwright':
+        specifier: ^4.1.10
+        version: 4.1.10(playwright@1.62.1)(vite@8.2.0(@types/node@26.1.2))(vitest@4.1.10)
       fake-indexeddb:
         specifier: ^6.2.5
         version: 6.2.5
@@ -1008,8 +1011,7 @@ snapshots:
   '@biomejs/cli-win32-x64@2.5.7':
     optional: true
 
-  '@blazediff/core@1.9.1':
-    optional: true
+  '@blazediff/core@1.9.1': {}
 
   '@emnapi/core@2.0.0-alpha.3':
     dependencies:
@@ -1038,8 +1040,7 @@ snapshots:
 
   '@oxc-project/types@0.142.0': {}
 
-  '@polka/url@1.0.0-next.29':
-    optional: true
+  '@polka/url@1.0.0-next.29': {}
 
   '@quansync/fs@1.0.0':
     dependencies:
@@ -1188,7 +1189,6 @@ snapshots:
       - msw
       - utf-8-validate
       - vite
-    optional: true
 
   '@vitest/browser@4.1.10(vite@8.2.0(@types/node@26.1.2))(vitest@4.1.10)':
     dependencies:
@@ -1206,7 +1206,6 @@ snapshots:
       - msw
       - utf-8-validate
       - vite
-    optional: true
 
   '@vitest/expect@4.1.10':
     dependencies:
@@ -1416,8 +1415,7 @@ snapshots:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  mrmime@2.0.1:
-    optional: true
+  mrmime@2.0.1: {}
 
   nanoid@3.3.16: {}
 
@@ -1429,18 +1427,15 @@ snapshots:
 
   picomatch@4.0.5: {}
 
-  playwright-core@1.62.1:
-    optional: true
+  playwright-core@1.62.1: {}
 
   playwright@1.62.1:
     dependencies:
       playwright-core: 1.62.1
     optionalDependencies:
       fsevents: 2.3.2
-    optional: true
 
-  pngjs@7.0.0:
-    optional: true
+  pngjs@7.0.0: {}
 
   postcss@8.5.25:
     dependencies:
@@ -1494,7 +1489,6 @@ snapshots:
       '@polka/url': 1.0.0-next.29
       mrmime: 2.0.1
       totalist: 3.0.1
-    optional: true
 
   source-map-js@1.2.1: {}
 
@@ -1513,8 +1507,7 @@ snapshots:
 
   tinyrainbow@3.1.1: {}
 
-  totalist@3.0.1:
-    optional: true
+  totalist@3.0.1: {}
 
   tree-kill@1.2.2: {}
 
@@ -1622,8 +1615,7 @@ snapshots:
       siginfo: 2.0.0
       stackback: 0.0.2
 
-  ws@8.21.1:
-    optional: true
+  ws@8.21.1: {}
 
   yuku-ast@0.8.2:
     dependencies:
