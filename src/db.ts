@@ -7,11 +7,23 @@
  */
 type DatabaseEntry = {
   connection: Promise<IDBDatabase>
-  /** Object stores the cached connection is known to expose. */
-  stores: Set<string>
+  /** The resolved connection, once available. Absent while still opening. */
+  database?: IDBDatabase
 }
 
 const databases = new Map<string, DatabaseEntry>()
+
+/**
+ * Drop `entry` from the cache unless a newer one has already replaced it.
+ *
+ * Every eviction goes through here. Deleting by database name alone would let
+ * a late cleanup — an `onclose` for a long-dead connection, say — take out a
+ * healthy entry opened in the meantime, stranding its connection outside the
+ * cache while a second one is opened alongside it.
+ */
+function evict(databaseName: string, entry: DatabaseEntry): void {
+  if (databases.get(databaseName) === entry) databases.delete(databaseName)
+}
 
 /** An upgrade can lose a version race against another tab; bound the retries. */
 const MAX_OPEN_ATTEMPTS = 5
@@ -51,19 +63,16 @@ export function ensureStore(
   storeName: string,
 ): Promise<IDBDatabase> {
   const current = databases.get(databaseName)
-  if (current?.stores.has(storeName)) return current.connection
-
-  // The `stores` set doubles as this entry's identity token, so asynchronous
-  // cleanup only ever evicts itself and never a newer connection.
-  const stores = new Set<string>()
-  const evict = () => {
-    if (databases.get(databaseName)?.stores === stores) {
-      databases.delete(databaseName)
-    }
+  if (current?.database?.objectStoreNames.contains(storeName)) {
+    return current.connection
   }
 
+  // Assigned below, before any of the closures can run.
+  let entry: DatabaseEntry
+  const evictSelf = () => evict(databaseName, entry)
+
   const track = (database: IDBDatabase) => {
-    for (const name of database.objectStoreNames) stores.add(name)
+    entry.database = database
     // Rebind on every adoption: an inherited connection still points at the
     // previous entry's (now stale) eviction closure.
     //
@@ -71,10 +80,10 @@ export function ensureStore(
     // invalidate the cache so the next call reconnects.
     database.onversionchange = () => {
       database.close()
-      evict()
+      evictSelf()
     }
     // Drop the stale connection from the cache whenever it closes abnormally.
-    database.onclose = evict
+    database.onclose = evictSelf
     return database
   }
 
@@ -90,10 +99,11 @@ export function ensureStore(
     ? previous.then(adopt, () => adopt(undefined))
     : adopt(undefined)
 
-  databases.set(databaseName, { connection, stores })
+  entry = { connection }
+  databases.set(databaseName, entry)
   // Never leave a rejected connection cached, otherwise every later call is
   // dragged down by the same failure.
-  connection.catch(evict)
+  connection.catch(evictSelf)
   return connection
 }
 
@@ -218,8 +228,11 @@ export async function withStore<T>(
       if (!reconnected && isClosedConnection(error)) {
         reconnected = true
         // `onversionchange` normally evicts the entry already; drop it here too
-        // in case the connection died without firing either handler.
-        databases.delete(databaseName)
+        // in case the connection died without firing either handler. Match on
+        // the connection we actually tripped over, so an entry opened
+        // concurrently is left in place rather than replaced by a second one.
+        const entry = databases.get(databaseName)
+        if (entry?.database === database) evict(databaseName, entry)
         continue
       }
       // WebKit intermittently aborts a Blob/File write while "preparing" the
