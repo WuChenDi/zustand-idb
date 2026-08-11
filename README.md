@@ -74,11 +74,11 @@ await useUserStore.setState({ name: 'Kaley' })
 
 Returns a Zustand `PersistStorage` that reads, writes, and deletes state in that object store. The `name` option of your `persist()` middleware is used as the **row key**, so multiple stores can share one `databaseName` + `storeName` while each keeps its own rehydration and migration logic.
 
-When IndexedDB turns out to be unavailable, the storage degrades to an in-memory implementation on first use and warns once: hydration and state stay usable for the session, but nothing is persisted. Only failures to *connect* degrade — an error raised by a running transaction (`QuotaExceededError`, a value that can't be structured-cloned, …) rejects normally so you can handle it.
+When IndexedDB turns out to be unavailable, the storage degrades to an in-memory implementation on first use and warns once: hydration and state stay usable for the session, but nothing is persisted. Only failures to *connect* degrade — an error raised by a running transaction (`QuotaExceededError`, a value that can't be structured-cloned, …) rejects normally so you can handle it. See [Error handling](#error-handling) for the shape of those rejections.
 
 ### `deleteDatabase(databaseName)`
 
-Closes any connection this package holds to `databaseName` — waiting for the close to land — and deletes the entire database. Useful for logout cleanup or schema resets. Rejects if the deletion is blocked by a connection held elsewhere (e.g. another tab), and resolves as a no-op when IndexedDB is unavailable.
+Closes any connection this package holds to `databaseName` — waiting for the close to land — and deletes the entire database. Useful for logout cleanup or schema resets. Rejects with a `BlockedError` if the deletion is blocked by a connection held elsewhere (e.g. another tab), and resolves as a no-op when IndexedDB is unavailable.
 
 ```ts
 import { deleteDatabase } from '@cdlab/zustand-idb'
@@ -108,11 +108,40 @@ import { storeKeys } from '@cdlab/zustand-idb'
 await storeKeys('my-app', 'stores') // => ['files', 'user']
 ```
 
+## Error handling
+
+IndexedDB reports failures as bare `DOMException`s with no stack and a message that names neither the database, the store, nor the row — `Failed to write blobs (IOError)` on its own is unactionable in a production report. Every rejection from this package is therefore wrapped in an `Error` that adds that context:
+
+```
+[zustand-idb] setItem "user" on "my-app/stores" failed: UnknownError: Failed to write blobs (IOError)
+```
+
+Two things are preserved so you can still branch on the failure:
+
+- **`error.name`** is carried over from the original, so the usual checks keep working.
+- **`error.cause`** holds the original `DOMException` untouched.
+
+```ts
+try {
+  await useStore.persist.rehydrate()
+} catch (error) {
+  if (error.name === 'QuotaExceededError') {
+    // Out of disk: prompt the user to free space, or drop cached data.
+  }
+  // The untouched DOMException, if you need `instanceof` or extra fields.
+  console.error(error.cause)
+}
+```
+
+Note that `error instanceof DOMException` is `false` on the wrapper — use `error.name`, or reach through `error.cause`.
+
+Some failures are retried internally before they ever reach you: transient Blob/File write aborts (WebKit and Chromium), a connection closed by another tab's upgrade, and an upgrade momentarily blocked by another tab. What surfaces has already outlived a bounded retry budget, so treat it as a real failure rather than jitter — `InvalidBlob` usually means the source Blob/File is no longer readable, and `IOError` points at the disk itself.
+
 ## How it works
 
 - **Connection cache** — one `IDBDatabase` connection is opened per `databaseName` and shared by every object store inside it. Keeping it per-database rather than per store means this package's own connections never block each other's upgrades. Transactions on a shared connection commit in call order, so rapid successive writes never land out of order.
 - **Automatic store creation** — opening a database without a fixed version number lets a brand-new database create the object store on first use; if the database already exists but the store is missing, it is created via a one-step version bump. Work on a database is serialized, and an upgrade that loses its version race against another tab is retried, so the resolved connection always exposes the store you asked for.
-- **Commit-accurate writes** — a write resolves on the transaction's `complete` event, not merely when the request is queued, so commit-time errors such as `QuotaExceededError` reject the promise instead of being lost.
+- **Commit-accurate writes** — a write resolves on the transaction's `complete` event, not merely when the request is queued, so commit-time errors such as `QuotaExceededError` reject the promise instead of being lost. Rejections carry the failing operation, row, and store; see [Error handling](#error-handling).
 - **Cross-tab safety** — the cached connection listens for `versionchange` and closes itself so another tab can upgrade or delete the database without being blocked.
 
 ## FAQ
