@@ -1,8 +1,15 @@
 name: CI
 
 on:
+  # Branch pushes are covered by the pull_request event; leaving `push`
+  # unfiltered ran the whole matrix twice for every commit on a PR.
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -25,6 +32,8 @@ jobs:
 
       # Browser tests exercise the IndexedDB implementation, not the Node
       # version, so run them once rather than on every matrix entry.
+      # `--only-shell` applies to Chromium alone — it swaps the full browser
+      # for the headless shell. WebKit is installed in full either way.
       - name: Install browsers
         if: matrix.node-version == 24
         run: pnpm browsers --only-shell
