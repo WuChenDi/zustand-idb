@@ -23,6 +23,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Browser tests exercise the IndexedDB implementation, not the Node
+      # version, so run them once rather than on every matrix entry.
+      - name: Install browsers
+        if: matrix.node-version == 24
+        run: pnpm browsers --only-shell
+
       - name: Lint
         run: pnpm lint
 
@@ -30,4 +36,8 @@ jobs:
         run: pnpm typecheck
 
       - name: Test
-        run: pnpm test
+        run: pnpm test:node
+
+      - name: Test (browser)
+        if: matrix.node-version == 24
+        run: pnpm test:browser

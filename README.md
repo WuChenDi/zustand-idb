@@ -207,8 +207,11 @@ Handled cooperatively. Each database uses one shared, cached connection that lis
 
 ```bash
 pnpm install
+pnpm run browsers    # one-off: Chromium for the browser test project
 pnpm run build       # ESM + CJS via tsdown
-pnpm run test        # vitest, running against fake-indexeddb in Node
+pnpm run test        # both test projects
+pnpm run test:node   # vitest against fake-indexeddb in Node
+pnpm run test:browser # vitest against a real Chromium IndexedDB
 pnpm run typecheck
 pnpm run lint
 ```
